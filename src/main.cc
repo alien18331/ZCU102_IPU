@@ -30,7 +30,7 @@
 #define delay_ms 500
 
 //Modbus IP Setting
-#define HOST_ADDR  "192.168.2.100"
+#define HOST_ADDR  "192.168.2.100" //FPGA IP
 #define HOST_PORT  502       /* using the standard port 502 requires root privileges */
 #define AUTH_ADDR  "192.168.2.10"  /* authorised client address */
 
@@ -44,7 +44,6 @@ using namespace cv;
 
 double t1,t2;
 
-//for modbus
 static int handle(mb_tcp_server_t *server, mb_tcp_adu_t *req, mb_tcp_adu_t *resp)
 {
     int ret = 0;
@@ -136,7 +135,7 @@ int runIPU(int num,char** name)
 		unsigned int bram_size = 0x100000;
 		off_t bram_pbase = 0xa0000000; // physical base address
 		uint32_t *bram32_vptr;
-		uint8_t buf[480],EBR_range;
+		uint8_t buf[480], EBR_range;
 		double start,capture_end, bram_save_end,EBR_end,image_save_end;
 
 		char filename[100];
@@ -247,8 +246,11 @@ int runIPU(int num,char** name)
 			bram_save_end = (double) getTickCount();
 			bram32_vptr[100003] = 0x01;
 			while(bram32_vptr[100002]!=1);
+
 			EBR_range = bram32_vptr[100000];
 			EBR_end = (double) getTickCount();
+
+			munmap(bram32_vptr, bram_size);
 
 	#ifdef NORMAL_FLOW
 			if(num==2)
@@ -291,7 +293,7 @@ int runIPU(int num,char** name)
 		double w1,w2;
 		w1 = (double)getTickCount();
 		w2 = (double)getTickCount();
-		while(w2-w1<delay_ms*1000000)
+		while(w2-w1 < delay_ms*1000000)
 			w2 = (double)getTickCount();
 	#endif
 	}
@@ -318,9 +320,9 @@ int main(int num,char** name)
 
 	t1 = (double) getTickCount();
 
-	//thread mT1(runIPU,num,name);
+	thread mT1(runIPU,num,name);
 	thread mT2(modbus_server);
-	//mT1.join();
+	mT1.join();
 	mT2.join();
     return 0;
 }
