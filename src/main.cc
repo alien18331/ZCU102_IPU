@@ -1,4 +1,7 @@
 /*  For description look into the help() function. */
+/* 20210322: add munmap function to release memory of bram32_vptr in line 279.
+ *
+ */
 
 #include "opencv2/core/core.hpp"
 #include "opencv2/videoio/videoio.hpp"
@@ -22,12 +25,29 @@
 
 
 //Set Mode
+/* NORMAL_FLOW:
+ * 	> def: image capture > IPU > save as BMP
+ * 	> undef: image capture > save as BMP > open BMP > IPU
+ * grayscale_compute:
+ * 	> def: transfer to gray scale and then save as BMP
+ * 	> undef: save as BMP by original image layer1's value as gray scale
+ * time_compute:
+ * 	> def: capture image with fixed count by "repeat_max" parameter
+ * 	> undef: capture image by loop
+ * repeat_max:
+ * 	> define max repeat count
+ * delay_update:
+ *  > def: insert delay function in every cycle
+ *  > undef: no delay function
+ * delay_ms:
+ *  > delay time for every cycle
+ */
 #define NORMAL_FLOW
 //#define grayscale_compute
 //#define time_compute
 //#define repeat_max 100
 #define delay_update
-#define delay_ms 500
+#define delay_ms 1000
 
 //Modbus IP Setting
 #define HOST_ADDR  "192.168.2.100" //FPGA IP
@@ -37,13 +57,15 @@
 //Holding Registers Setting
 #define HOLD_REG_ADDR   0x01
 #define HOLD_REG_QUANT  1
-uint16_t hold_reg[1] = {0xFFFF};
+//uint16_t hold_reg[1] = {0xFFFF};
+uint16_t hold_reg = 0xFFFF;
 
 using namespace std;
 using namespace cv;
 
 double t1,t2;
 
+//for modbus server create handler
 static int handle(mb_tcp_server_t *server, mb_tcp_adu_t *req, mb_tcp_adu_t *resp)
 {
     int ret = 0;
@@ -66,6 +88,7 @@ static int handle(mb_tcp_server_t *server, mb_tcp_adu_t *req, mb_tcp_adu_t *resp
             return -MB_PDU_EXCEPT_SERVER_DEV_FAIL;
         }
         return ret;
+    /*
     case MB_PDU_DIAG:
     	    switch (req->pdu.diag_req.sub_func)
     	    {
@@ -73,14 +96,15 @@ static int handle(mb_tcp_server_t *server, mb_tcp_adu_t *req, mb_tcp_adu_t *resp
     	    		mb_tcp_adu_set_header(resp, req->trans_id, req->proto_id, MB_TCP_SERVER_UNIT_ID);
     	    		ret = mb_pdu_set_diag_resp(&resp->pdu, req->pdu.diag_req.sub_func, req->pdu.diag_req.data, req->pdu.diag_req.num_data);
     	    		if (ret < 0)
-        		{
+    	    		{
             			return -MB_PDU_EXCEPT_SERVER_DEV_FAIL;
-        		}
+    	    		}
         		return ret;
 
         	default:
         		return -MB_PDU_EXCEPT_ILLEGAL_FUNC;
             }
+    */
 
     default:
         return -MB_PDU_EXCEPT_ILLEGAL_FUNC;
@@ -100,6 +124,7 @@ int modbus_server()
         mb_log_error("failed to create server: %s", strerror(-ret));
         return EXIT_FAILURE;
     }
+
     ret = mb_tcp_server_authorise_addr(&server, AUTH_ADDR);
     if (ret < 0)
     {
@@ -107,6 +132,7 @@ int modbus_server()
         mb_tcp_server_destroy(&server);
         return EXIT_FAILURE;
     }
+
     ret = mb_tcp_server_run(&server);
     if (ret < 0)
     {
@@ -120,12 +146,14 @@ int modbus_server()
 
 int runIPU(int num,char** name)
 {
+	uint16_t repeat_time = 0;
+	double capture_total = 0, bram_total = 0, ebr_total = 0, save_image_total = 0;
 
-	uint16_t repeat_time=0;
-	double capture_total=0,bram_total=0,ebr_total=0,save_image_total=0;
+	//video instance
 	VideoCapture capture(0);
+
 #ifdef time_compute
-	while(repeat_time<repeat_max)
+	while(repeat_time < repeat_max)
 #else
 	while(1)
 #endif
@@ -138,48 +166,63 @@ int runIPU(int num,char** name)
 		uint8_t buf[480], EBR_range;
 		double start,capture_end, bram_save_end,EBR_end,image_save_end;
 
+		//define filename
 		char filename[100];
 		snprintf(filename, sizeof(filename), "%s.bmp", name[1]);
 
 		start = (double) getTickCount(); // 1clock = 1ns
+
+		//capture function
 		if ( !capture.isOpened( ) )
 		{
 		        cout << "fail to open camera!" << endl;
 		        return 1;
 		}
+
+		//get a new frame from camera
 		capture>>srcImg;
 
-	#ifndef NORMAL_FLOW
+		//imwrite
+#ifndef NORMAL_FLOW
 		if(num==2)
 			imwrite(filename, srcImg);
 		else
 			imwrite("test.bmp", srcImg);
-	#endif
+#endif
 		capture_end = (double) getTickCount();
 
-	#ifndef NORMAL_FLOW
+		//imread
+#ifndef NORMAL_FLOW
 		FILE *fp;
 		if(num==2)
 			fp=fopen(filename,"rb"); // 640 x 480
 		else
 			fp=fopen("img_sample.bmp","rb"); // 640 x 480
-		fread(buf,sizeof(char),54,fp);
-	#endif
+
+		//copy fp into buffer, count:54 element
+		fread(buf, sizeof(char), 54, fp);
+#endif
+
 		// Map the BRAM physical address into user space getting a virtual address for it
 		if ((fd = open("/dev/mem", O_RDWR | O_SYNC)) != -1)
 		{
-
 			bram32_vptr = (uint32_t *)mmap(NULL, bram_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, bram_pbase);
 			bram32_vptr[100002] = 0x00;
-	#ifdef NORMAL_FLOW
-			uint32_t gray_temp,gray;
-			uint8_t* p = srcImg.data;
 
-			for(int i=479;i>=0;i--)
+#ifdef NORMAL_FLOW
+			uint32_t gray_temp, gray;
+			uint8_t* p = srcImg.data; //frame pointer
+			//640 x 480 image
+
+			//put frame to bram with axi bus, last row first
+			for(int i=479; i >= 0; i--)
 			{
 				uint8_t* p_temp;
-				p_temp	= p + i*1920 ;
-				for(int j=0;j<160;j++)
+				p_temp = p + i*1920;
+
+				//640*3=1920
+				//1920/12=160
+				for(int j=0; j < 160; j++)
 				{
 					uint32_t index;
 					index = 12*j;
@@ -196,14 +239,16 @@ int runIPU(int num,char** name)
 					gray_temp = (p_temp[9+index] * 30 + p_temp[10+index] * 59 + p_temp[11+index] * 11 + 50) / 100 ;
 					gray += gray_temp;
 	#else
+					//due to axi only support 32-bit for transmit, so combine 4 pixel as one word to axi interface.
 					gray = (p_temp[0+index]<<24) + (p_temp[3+index]<<16) + (p_temp[6+index]<<8) + p_temp[9+index] ;
 	#endif
+					//for IPU reading image with BMP format.
+					//opencv format transfer to BMP format.
 					bram32_vptr[j + 76640 - i*160 ] = gray ;
 				}
 			}
-
-	#endif
-	#ifndef NORMAL_FLOW
+#endif
+#ifndef NORMAL_FLOW
 			for (int j=0;j<640*3;j++)
 			{
 				fread(buf,sizeof(char),160*3,fp);
@@ -241,10 +286,13 @@ int runIPU(int num,char** name)
 					bram32_vptr[40*j+i] = gray;
 				}
 			}
-	#endif
+#endif
 
 			bram_save_end = (double) getTickCount();
+			//image transmit done, activate IPU
 			bram32_vptr[100003] = 0x01;
+
+			//watch done signal(bram32_vptr[100002] assert by IPU)
 			while(bram32_vptr[100002]!=1);
 
 			EBR_range = bram32_vptr[100000];
@@ -252,13 +300,14 @@ int runIPU(int num,char** name)
 
 			munmap(bram32_vptr, bram_size);
 
-	#ifdef NORMAL_FLOW
+			//image write
+#ifdef NORMAL_FLOW
 			if(num==2)
 				imwrite(filename, srcImg);
 			else
 				imwrite("test.bmp", srcImg);
 			image_save_end = (double) getTickCount();
-	#endif
+#endif
 /*
     #ifdef time_compute
 			printf("EBR_range=%d\r\n",EBR_range);
@@ -270,7 +319,8 @@ int runIPU(int num,char** name)
 	#endif
 	#endif
 */
-			hold_reg[0] = EBR_range ;
+			//hold_reg[0] = EBR_range ;
+			hold_reg = EBR_range ;
 			close(fd);
 		}
 		else
@@ -278,7 +328,7 @@ int runIPU(int num,char** name)
 			cout<<"fail to open BRAM!"<<endl;
 			return 1;
 		}
-	#ifdef time_compute
+#ifdef time_compute
 		capture_total +=(capture_end-start);
 		bram_total += (bram_save_end-capture_end);
 		ebr_total += (EBR_end-bram_save_end);
@@ -287,15 +337,15 @@ int runIPU(int num,char** name)
 	#endif
 		repeat_time++;
 		printf("%d times\r\n",repeat_time);
-	#endif
+#endif
 
-	#ifdef delay_update
+#ifdef delay_update
 		double w1,w2;
 		w1 = (double)getTickCount();
 		w2 = (double)getTickCount();
 		while(w2-w1 < delay_ms*1000000)
 			w2 = (double)getTickCount();
-	#endif
+#endif
 	}
 
 #ifdef time_compute
@@ -304,9 +354,10 @@ int runIPU(int num,char** name)
 	printf("capture_total %f s \r\n",capture_total/1000000000);
 	printf("bram_total  = %f s \r\n",bram_total/1000000000);
 	printf("ebr_total = %f ms \r\n",ebr_total/1000000);
-#ifdef NORMAL_FLOW
+
+	#ifdef NORMAL_FLOW
 	printf("save_image_total = %f s \r\n",save_image_total/1000000000);
-#endif
+	#endif
 
 #endif
 	capture.release();
@@ -317,12 +368,13 @@ int runIPU(int num,char** name)
 
 int main(int num,char** name)
 {
-
 	t1 = (double) getTickCount();
 
-	thread mT1(runIPU,num,name);
+	thread mT1(runIPU, num, name);
 	thread mT2(modbus_server);
+
 	mT1.join();
 	mT2.join();
+
     return 0;
 }
