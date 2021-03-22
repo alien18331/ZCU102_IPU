@@ -22,12 +22,29 @@
 
 
 //Set Mode
+/* NORMAL_FLOW:
+ * 	> def: image capture > IPU > save as BMP
+ * 	> undef: image capture > save as BMP > open BMP > IPU
+ * grayscale_compute:
+ * 	> def: transfer to gray scale and then save as BMP
+ * 	> undef: save as BMP by original image layer1's value as gray scale
+ * time_compute:
+ * 	> def: capture image with fixed count by "repeat_max" parameter
+ * 	> undef: capture image by loop
+ * repeat_max:
+ * 	> define max repeat count
+ * delay_update:
+ *  > def: insert delay function in every cycle
+ *  > undef: no delay function
+ * delay_ms:
+ *  > delay time for every cycle
+ */
 #define NORMAL_FLOW
 //#define grayscale_compute
 //#define time_compute
 //#define repeat_max 100
 #define delay_update
-#define delay_ms 500
+#define delay_ms 1000
 
 //Modbus IP Setting
 #define HOST_ADDR  "192.168.2.100" //FPGA IP
@@ -44,6 +61,7 @@ using namespace cv;
 
 double t1,t2;
 
+//for modbus server create handler
 static int handle(mb_tcp_server_t *server, mb_tcp_adu_t *req, mb_tcp_adu_t *resp)
 {
     int ret = 0;
@@ -121,11 +139,14 @@ int modbus_server()
 int runIPU(int num,char** name)
 {
 
-	uint16_t repeat_time=0;
-	double capture_total=0,bram_total=0,ebr_total=0,save_image_total=0;
+	uint16_t repeat_time = 0;
+	double capture_total = 0, bram_total = 0, ebr_total = 0, save_image_total = 0;
+
+	//video instance
 	VideoCapture capture(0);
+
 #ifdef time_compute
-	while(repeat_time<repeat_max)
+	while(repeat_time < repeat_max)
 #else
 	while(1)
 #endif
